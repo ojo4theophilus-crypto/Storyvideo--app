@@ -17,19 +17,11 @@ app.use(express.static(path.join(__dirname, 'public')));
 const PORT = process.env.PORT || 3000;
 const POLLINATIONS_KEY = process.env.POLLINATIONS_API_KEY || '';
 
-// In-memory job store. Fine for a single-instance personal-use app.
 const jobs = {};
 
 function newJob() {
   const id = uuidv4();
-  jobs[id] = {
-    id,
-    status: 'queued',
-    progress: 0,
-    log: [],
-    videoUrl: null,
-    error: null
-  };
+  jobs[id] = { id, status: 'queued', progress: 0, log: [], videoUrl: null, error: null };
   return jobs[id];
 }
 
@@ -39,7 +31,6 @@ function log(job, msg) {
   if (job.log.length > 200) job.log.shift();
 }
 
-// ---------- Utility: run a shell command as a Promise ----------
 function runCmd(cmd, args) {
   return new Promise((resolve, reject) => {
     const proc = spawn(cmd, args);
@@ -57,16 +48,13 @@ function runCmd(cmd, args) {
 
 async function getAudioDuration(filePath) {
   const out = await runCmd(ffprobePath, [
-    '-v', 'error',
-    '-show_entries', 'format=duration',
-    '-of', 'default=noprint_wrappers=1:nokey=1',
-    filePath
+    '-v', 'error', '-show_entries', 'format=duration',
+    '-of', 'default=noprint_wrappers=1:nokey=1', filePath
   ]);
   const dur = parseFloat(out.trim());
   return isNaN(dur) ? 4 : dur;
 }
 
-// ---------- Step 1: story -> scenes (Pollinations free text API) ----------
 async function breakdownStory(story) {
   const systemPrompt = `You are a film storyboard assistant. Break the given story or idea into 6-10 concise cinematic scenes for a short narrated video.
 Respond ONLY with a JSON array, no preamble, no markdown fences. Each item must have exactly these fields:
@@ -75,9 +63,12 @@ Respond ONLY with a JSON array, no preamble, no markdown fences. Each item must 
 - "movement": one of "zoom_in", "zoom_out", "pan_left", "pan_right", "static"
 Return valid JSON only, nothing else.`;
 
-  const res = await fetch('https://text.pollinations.ai/openai', {
+  const res = await fetch('https://gen.pollinations.ai/v1/chat/completions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${POLLINATIONS_KEY}`
+    },
     body: JSON.stringify({
       model: 'openai',
       messages: [
@@ -116,17 +107,17 @@ Return valid JSON only, nothing else.`;
   return scenes;
 }
 
-// ---------- Step 2: image per scene (Pollinations free image API, no key) ----------
 async function generateImage(prompt, outPath) {
   const seed = Math.floor(Math.random() * 1000000);
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1920&height=1080&nologo=true&seed=${seed}`;
-  const res = await fetch(url);
+  const url = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?model=flux&width=1920&height=1080&seed=${seed}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${POLLINATIONS_KEY}` }
+  });
   if (!res.ok) throw new Error(`Image API error ${res.status}`);
   const buf = Buffer.from(await res.arrayBuffer());
   fs.writeFileSync(outPath, buf);
 }
 
-// ---------- Step 3: narration audio per scene (needs a free Pollinations API key) ----------
 async function generateAudio(text, outPath) {
   if (!POLLINATIONS_KEY) {
     throw new Error('Missing POLLINATIONS_API_KEY. Get a free key at https://enter.pollinations.ai and set it as an environment variable.');
@@ -147,7 +138,6 @@ async function generateAudio(text, outPath) {
   fs.writeFileSync(outPath, buf);
 }
 
-// ---------- Step 4: build one Ken-Burns clip (image + audio -> mp4) ----------
 function buildZoompanFilter(movement, frames, w = 1920, h = 1080) {
   const base = `scale=${w * 2}:-1,setsar=1`;
   switch (movement) {
@@ -170,32 +160,22 @@ async function buildSceneClip(imagePath, audioPath, movement, outPath) {
   const filter = buildZoompanFilter(movement, frames);
 
   const args = [
-    '-y',
-    '-loop', '1',
-    '-i', imagePath,
-    '-i', audioPath,
+    '-y', '-loop', '1', '-i', imagePath, '-i', audioPath,
     '-filter_complex', `[0:v]${filter}[v]`,
-    '-map', '[v]',
-    '-map', '1:a',
+    '-map', '[v]', '-map', '1:a',
     '-t', duration.toFixed(2),
-    '-c:v', 'libx264',
-    '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac',
-    '-b:a', '128k',
-    '-shortest',
-    outPath
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '128k', '-shortest', outPath
   ];
   await runCmd(ffmpegPath, args);
 }
 
-// ---------- Step 5: concat all scene clips into the final video ----------
 async function concatClips(clipPaths, listPath, outPath) {
   const listContent = clipPaths.map(p => `file '${p.replace(/'/g, "'\\''")}'`).join('\n');
   fs.writeFileSync(listPath, listContent);
   await runCmd(ffmpegPath, ['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', outPath]);
 }
 
-// ---------- Full pipeline ----------
 async function processJob(job, story) {
   try {
     const workDir = path.join(os.tmpdir(), 'storyvideo', job.id);
@@ -250,11 +230,9 @@ async function processJob(job, story) {
   }
 }
 
-// ---------- Routes ----------
 app.post('/api/generate', (req, res) => {
   const story = (req.body.story || '').trim();
   if (!story) return res.status(400).json({ error: 'Story text is required.' });
-
   const job = newJob();
   processJob(job, story);
   res.json({ jobId: job.id });
@@ -269,3 +247,6 @@ app.get('/api/status/:id', (req, res) => {
 app.listen(PORT, () => {
   console.log(`StoryVideo app running on port ${PORT}`);
 });
+  
+
+  
