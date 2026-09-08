@@ -1,6 +1,5 @@
-      
-require('dotenv').config();
-const express = require('express'); 
+    require('dotenv').config();
+const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
@@ -111,7 +110,7 @@ Return valid JSON only, nothing else.`;
 
 async function generateImage(prompt, outPath) {
   const seed = Math.floor(Math.random() * 1000000);
-  const url = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?model=flux&width=1920&height=1080&seed=${seed}`;
+  const url = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?model=flux&width=1280&height=720&seed=${seed}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${POLLINATIONS_KEY}` }
   });
@@ -225,25 +224,25 @@ async function splitBatchAudio(batchAudioPath, texts, workDir, batchIndex) {
   return outPaths;
 }
 
-function buildZoompanFilter(movement, frames, w = 1920, h = 1080) {
-  const base = `scale=${w * 2}:-1,setsar=1`;
+function buildZoompanFilter(movement, frames, w = 1280, h = 720) {
+  const base = `scale=${Math.round(w * 1.3)}:-1,setsar=1`;
   switch (movement) {
     case 'zoom_in':
-      return `${base},zoompan=z='min(zoom+0.0020,1.4)':d=${frames}:s=${w}x${h}:fps=30`;
+      return `${base},zoompan=z='min(zoom+0.0020,1.4)':d=${frames}:s=${w}x${h}:fps=24`;
     case 'zoom_out':
-      return `${base},zoompan=z='min(zoom+0.0020,1.4)':d=${frames}:s=${w}x${h}:fps=30,reverse`;
+      return `${base},zoompan=z='min(zoom+0.0020,1.4)':d=${frames}:s=${w}x${h}:fps=24,reverse`;
     case 'pan_left':
-      return `${base},zoompan=z='1.18':x='(iw-iw/zoom)*(1-on/${frames})':y='(ih-ih/zoom)/2':d=${frames}:s=${w}x${h}:fps=30`;
+      return `${base},zoompan=z='1.18':x='(iw-iw/zoom)*(1-on/${frames})':y='(ih-ih/zoom)/2':d=${frames}:s=${w}x${h}:fps=24`;
     case 'pan_right':
-      return `${base},zoompan=z='1.18':x='(iw-iw/zoom)*(on/${frames})':y='(ih-ih/zoom)/2':d=${frames}:s=${w}x${h}:fps=30`;
+      return `${base},zoompan=z='1.18':x='(iw-iw/zoom)*(on/${frames})':y='(ih-ih/zoom)/2':d=${frames}:s=${w}x${h}:fps=24`;
     default:
-      return `${base},zoompan=z='1.08':d=${frames}:s=${w}x${h}:fps=30`;
+      return `${base},zoompan=z='1.08':d=${frames}:s=${w}x${h}:fps=24`;
   }
 }
 
 async function buildSceneClip(imagePath, audioPath, movement, outPath) {
   const duration = await getAudioDuration(audioPath);
-  const frames = Math.max(30, Math.round(duration * 30));
+  const frames = Math.max(24, Math.round(duration * 24));
   const filter = buildZoompanFilter(movement, frames);
 
   const args = [
@@ -251,7 +250,8 @@ async function buildSceneClip(imagePath, audioPath, movement, outPath) {
     '-filter_complex', `[0:v]${filter}[v]`,
     '-map', '[v]', '-map', '1:a',
     '-t', duration.toFixed(2),
-    '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-threads', '1',
+    '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '128k', '-shortest', outPath
   ];
   await runCmd(ffmpegPath, args);
@@ -345,7 +345,28 @@ app.get('/api/status/:id', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`StoryVideo app running on port ${PORT}`);
-});
+});  
+
+
+
+
+
+  
+
+
+    
+  
+
+  
+
+  
+
+  
+
+
+
+
+
 
 
   
