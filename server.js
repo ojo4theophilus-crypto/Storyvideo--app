@@ -1,5 +1,6 @@
+      
 require('dotenv').config();
-const express = require('express');
+const express = require('express'); 
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
@@ -16,6 +17,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3000;
 const POLLINATIONS_KEY = process.env.POLLINATIONS_API_KEY || '';
+const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
 
 const jobs = {};
 
@@ -118,24 +120,109 @@ async function generateImage(prompt, outPath) {
   fs.writeFileSync(outPath, buf);
 }
 
-async function generateAudio(text, outPath) {
-  if (!POLLINATIONS_KEY) {
-    throw new Error('Missing POLLINATIONS_API_KEY. Get a free key at https://enter.pollinations.ai and set it as an environment variable.');
+function pcmToWav(pcmBuffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16) {
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const dataSize = pcmBuffer.length;
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(dataSize, 40);
+  return Buffer.concat([header, pcmBuffer]);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+let lastTTSCallAt = 0;
+async function waitForTTSRateLimit() {
+  const minGapMs = 31000;
+  const elapsed = Date.now() - lastTTSCallAt;
+  if (lastTTSCallAt > 0 && elapsed < minGapMs) {
+    await sleep(minGapMs - elapsed);
   }
-  const res = await fetch('https://gen.pollinations.ai/v1/audio/speech', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${POLLINATIONS_KEY}`
-    },
-    body: JSON.stringify({ model: 'tts-1', input: text, voice: 'alloy' })
-  });
+  lastTTSCallAt = Date.now();
+}
+
+async function generateBatchAudio(texts, outPath) {
+  if (!GEMINI_KEY) {
+    throw new Error('Missing GEMINI_API_KEY. Get a free key at https://aistudio.google.com/apikey and set it as an environment variable.');
+  }
+  await waitForTTSRateLimit();
+
+  const combinedText = texts.join('. ... ');
+
+  const res = await fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': GEMINI_KEY
+      },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: combinedText }] }],
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } }
+        }
+      })
+    }
+  );
+
   if (!res.ok) {
     const t = await res.text();
     throw new Error(`TTS API error ${res.status}: ${t.slice(0, 300)}`);
   }
-  const buf = Buffer.from(await res.arrayBuffer());
-  fs.writeFileSync(outPath, buf);
+
+  const data = await res.json();
+  const part = data.candidates?.[0]?.content?.parts?.[0];
+  if (!part || !part.inlineData || !part.inlineData.data) {
+    throw new Error('TTS response did not contain audio data.');
+  }
+
+  const mimeType = part.inlineData.mimeType || '';
+  const rateMatch = mimeType.match(/rate=(\d+)/);
+  const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+
+  const pcmBuffer = Buffer.from(part.inlineData.data, 'base64');
+  const wavBuffer = pcmToWav(pcmBuffer, sampleRate);
+  fs.writeFileSync(outPath, wavBuffer);
+}
+
+async function splitBatchAudio(batchAudioPath, texts, workDir, batchIndex) {
+  const totalDuration = await getAudioDuration(batchAudioPath);
+  const totalChars = texts.reduce((sum, t) => sum + t.length, 0) || 1;
+
+  const outPaths = [];
+  let cursor = 0;
+  for (let i = 0; i < texts.length; i++) {
+    const share = texts[i].length / totalChars;
+    const segDuration = Math.max(0.6, totalDuration * share);
+    const outPath = path.join(workDir, `audio_${batchIndex}_${i}.wav`);
+    const args = [
+      '-y', '-i', batchAudioPath,
+      '-ss', cursor.toFixed(2),
+      '-t', segDuration.toFixed(2),
+      '-acodec', 'pcm_s16le',
+      outPath
+    ];
+    await runCmd(ffmpegPath, args);
+    outPaths.push(outPath);
+    cursor += segDuration;
+  }
+  return outPaths;
 }
 
 function buildZoompanFilter(movement, frames, w = 1920, h = 1080) {
@@ -176,6 +263,8 @@ async function concatClips(clipPaths, listPath, outPath) {
   await runCmd(ffmpegPath, ['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', outPath]);
 }
 
+const BATCH_SIZE = 5;
+
 async function processJob(job, story) {
   try {
     const workDir = path.join(os.tmpdir(), 'storyvideo', job.id);
@@ -187,25 +276,35 @@ async function processJob(job, story) {
     job.progress = 10;
     log(job, `Got ${scenes.length} scenes.`);
 
-    const clipPaths = [];
+    const imagePaths = [];
     for (let i = 0; i < scenes.length; i++) {
-      const scene = scenes[i];
       job.status = 'generating_images';
       log(job, `Scene ${i + 1}/${scenes.length}: generating image...`);
       const imgPath = path.join(workDir, `image_${i}.jpg`);
-      await generateImage(scene.image_prompt, imgPath);
+      await generateImage(scenes[i].image_prompt, imgPath);
+      imagePaths.push(imgPath);
       job.progress = 10 + Math.round((i / scenes.length) * 30);
+    }
 
+    const numBatches = Math.ceil(scenes.length / BATCH_SIZE);
+    const audioPaths = [];
+    for (let b = 0; b < numBatches; b++) {
+      const batchScenes = scenes.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
       job.status = 'generating_audio';
-      log(job, `Scene ${i + 1}/${scenes.length}: generating narration...`);
-      const audPath = path.join(workDir, `audio_${i}.mp3`);
-      await generateAudio(scene.narration, audPath);
-      job.progress = 40 + Math.round((i / scenes.length) * 30);
+      log(job, `Narration batch ${b + 1}/${numBatches} (${batchScenes.length} scenes)...`);
+      const batchAudioPath = path.join(workDir, `batch_${b}.wav`);
+      await generateBatchAudio(batchScenes.map(s => s.narration), batchAudioPath);
+      const splitPaths = await splitBatchAudio(batchAudioPath, batchScenes.map(s => s.narration), workDir, b);
+      audioPaths.push(...splitPaths);
+      job.progress = 40 + Math.round(((b + 1) / numBatches) * 30);
+    }
 
+    const clipPaths = [];
+    for (let i = 0; i < scenes.length; i++) {
       job.status = 'assembling';
       log(job, `Scene ${i + 1}/${scenes.length}: building clip...`);
       const clipPath = path.join(workDir, `clip_${i}.mp4`);
-      await buildSceneClip(imgPath, audPath, scene.movement, clipPath);
+      await buildSceneClip(imagePaths[i], audioPaths[i], scenes[i].movement, clipPath);
       clipPaths.push(clipPath);
       job.progress = 70 + Math.round((i / scenes.length) * 20);
     }
@@ -247,6 +346,6 @@ app.get('/api/status/:id', (req, res) => {
 app.listen(PORT, () => {
   console.log(`StoryVideo app running on port ${PORT}`);
 });
-  
+
 
   
