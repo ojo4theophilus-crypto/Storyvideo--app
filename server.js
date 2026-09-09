@@ -108,9 +108,9 @@ Return valid JSON only, nothing else.`;
   return scenes;
 }
 
-async function generateImage(prompt, outPath) {
+async function generateImage(prompt, outPath, width = 1280, height = 720) {
   const seed = Math.floor(Math.random() * 1000000);
-  const url = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?model=flux&width=1280&height=720&seed=${seed}`;
+  const url = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?model=flux&width=${width}&height=${height}&seed=${seed}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${POLLINATIONS_KEY}` }
   });
@@ -240,10 +240,10 @@ function buildZoompanFilter(movement, frames, w = 1280, h = 720) {
   }
 }
 
-async function buildSceneClip(imagePath, audioPath, movement, outPath) {
+async function buildSceneClip(imagePath, audioPath, movement, outPath, width = 1280, height = 720) {
   const duration = await getAudioDuration(audioPath);
   const frames = Math.max(24, Math.round(duration * 24));
-  const filter = buildZoompanFilter(movement, frames);
+  const filter = buildZoompanFilter(movement, frames, width, height);
 
   const args = [
     '-y', '-loop', '1', '-i', imagePath, '-i', audioPath,
@@ -265,10 +265,15 @@ async function concatClips(clipPaths, listPath, outPath) {
 
 const BATCH_SIZE = 5;
 
-async function processJob(job, story) {
+async function processJob(job, story, format) {
   try {
     const workDir = path.join(os.tmpdir(), 'storyvideo', job.id);
     fs.mkdirSync(workDir, { recursive: true });
+
+    const isVertical = format === '9:16';
+    const width = isVertical ? 720 : 1280;
+    const height = isVertical ? 1280 : 720;
+    log(job, `Format: ${isVertical ? '9:16 (Shorts/Reels/TikTok)' : '16:9 (YouTube long-form)'} — ${width}x${height}`);
 
     job.status = 'breaking_down';
     log(job, 'Breaking story into scenes...');
@@ -281,7 +286,7 @@ async function processJob(job, story) {
       job.status = 'generating_images';
       log(job, `Scene ${i + 1}/${scenes.length}: generating image...`);
       const imgPath = path.join(workDir, `image_${i}.jpg`);
-      await generateImage(scenes[i].image_prompt, imgPath);
+      await generateImage(scenes[i].image_prompt, imgPath, width, height);
       imagePaths.push(imgPath);
       job.progress = 10 + Math.round((i / scenes.length) * 30);
     }
@@ -304,7 +309,7 @@ async function processJob(job, story) {
       job.status = 'assembling';
       log(job, `Scene ${i + 1}/${scenes.length}: building clip...`);
       const clipPath = path.join(workDir, `clip_${i}.mp4`);
-      await buildSceneClip(imagePaths[i], audioPaths[i], scenes[i].movement, clipPath);
+      await buildSceneClip(imagePaths[i], audioPaths[i], scenes[i].movement, clipPath, width, height);
       clipPaths.push(clipPath);
       job.progress = 70 + Math.round((i / scenes.length) * 20);
     }
@@ -332,8 +337,11 @@ async function processJob(job, story) {
 app.post('/api/generate', (req, res) => {
   const story = (req.body.story || '').trim();
   if (!story) return res.status(400).json({ error: 'Story text is required.' });
+
+  const format = req.body.format === '9:16' ? '9:16' : '16:9';
+
   const job = newJob();
-  processJob(job, story);
+  processJob(job, story, format);
   res.json({ jobId: job.id });
 });
 
@@ -346,7 +354,6 @@ app.get('/api/status/:id', (req, res) => {
 app.listen(PORT, () => {
   console.log(`StoryVideo app running on port ${PORT}`);
 });
-
 
   
   
