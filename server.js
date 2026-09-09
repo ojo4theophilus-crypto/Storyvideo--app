@@ -230,7 +230,7 @@ function buildZoompanFilter(movement, frames, w = 1280, h = 720) {
     case 'zoom_in':
       return `${base},zoompan=z='min(zoom+0.0020,1.4)':d=${frames}:s=${w}x${h}:fps=24`;
     case 'zoom_out':
-      return `${base},zoompan=z='min(zoom+0.0020,1.4)':d=${frames}:s=${w}x${h}:fps=24,reverse`;
+      return `${base},zoompan=z='max(1.4-0.0020*on,1.0)':d=${frames}:s=${w}x${h}:fps=24`;
     case 'pan_left':
       return `${base},zoompan=z='1.18':x='(iw-iw/zoom)*(1-on/${frames})':y='(ih-ih/zoom)/2':d=${frames}:s=${w}x${h}:fps=24`;
     case 'pan_right':
@@ -345,9 +345,11 @@ app.get('/api/status/:id', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`StoryVideo app running on port ${PORT}`);
-});  
+});
 
 
+  
+  
 
 
 
