@@ -185,10 +185,12 @@ async function waitForTTSRateLimit() {
   lastTTSCallAt = Date.now();
 }
 
-// Retries only on transient server-side errors (500/503), which Gemini's free
-// tier throws occasionally under high demand. Does NOT retry on other errors
-// (e.g. bad request, auth failure) since those won't fix themselves.
-// Max 3 attempts total, with a growing wait between each (2s, then 5s).
+// Retries only on transient server-side errors (500/503) and on network-level
+// failures (e.g. "fetch failed" / connection dropped), which Gemini's free
+// tier and Render's free network occasionally throw under load. Does NOT
+// retry on other HTTP errors (e.g. bad request, auth failure) since those
+// won't fix themselves. Max 3 attempts total, with a growing wait between
+// each (2s, then 5s).
 const TTS_RETRY_STATUS_CODES = [500, 503];
 const TTS_MAX_ATTEMPTS = 3;
 const TTS_RETRY_DELAYS_MS = [2000, 5000];
@@ -223,7 +225,21 @@ async function generateBatchAudio(texts, outPath) {
   let res;
   let lastErrorText = '';
   for (let attempt = 1; attempt <= TTS_MAX_ATTEMPTS; attempt++) {
-    res = await callTTSApi(combinedText);
+    try {
+      res = await callTTSApi(combinedText);
+    } catch (networkErr) {
+      // The request itself failed (e.g. "fetch failed" / connection dropped),
+      // as opposed to the server responding with an error status. Treat this
+      // the same as a retryable 500/503, up to the same attempt limit.
+      const isLastAttempt = attempt >= TTS_MAX_ATTEMPTS;
+      if (isLastAttempt) {
+        throw new Error(`TTS network error after ${attempt} attempt(s): ${networkErr.message}`);
+      }
+      const delay = TTS_RETRY_DELAYS_MS[attempt - 1] || 5000;
+      await sleep(delay);
+      continue;
+    }
+
     if (res.ok) break;
 
     lastErrorText = await res.text();
@@ -235,8 +251,8 @@ async function generateBatchAudio(texts, outPath) {
     await sleep(delay);
   }
 
-  if (!res.ok) {
-    throw new Error(`TTS API error ${res.status}: ${lastErrorText.slice(0, 300)}`);
+  if (!res || !res.ok) {
+    throw new Error(`TTS API error ${res ? res.status : 'unknown'}: ${lastErrorText.slice(0, 300)}`);
   }
 
   const data = await res.json();
