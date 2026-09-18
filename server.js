@@ -185,14 +185,16 @@ async function waitForTTSRateLimit() {
   lastTTSCallAt = Date.now();
 }
 
-async function generateBatchAudio(texts, outPath) {
-  if (!GEMINI_KEY) {
-    throw new Error('Missing GEMINI_API_KEY. Get a free key at https://aistudio.google.com/apikey and set it as an environment variable.');
-  }
-  await waitForTTSRateLimit();
-  const combinedText = texts.join('. ... ');
+// Retries only on transient server-side errors (500/503), which Gemini's free
+// tier throws occasionally under high demand. Does NOT retry on other errors
+// (e.g. bad request, auth failure) since those won't fix themselves.
+// Max 3 attempts total, with a growing wait between each (2s, then 5s).
+const TTS_RETRY_STATUS_CODES = [500, 503];
+const TTS_MAX_ATTEMPTS = 3;
+const TTS_RETRY_DELAYS_MS = [2000, 5000];
 
-  const res = await fetch(
+async function callTTSApi(combinedText) {
+  return fetch(
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent',
     {
       method: 'POST',
@@ -209,10 +211,32 @@ async function generateBatchAudio(texts, outPath) {
       })
     }
   );
+}
+
+async function generateBatchAudio(texts, outPath) {
+  if (!GEMINI_KEY) {
+    throw new Error('Missing GEMINI_API_KEY. Get a free key at https://aistudio.google.com/apikey and set it as an environment variable.');
+  }
+  await waitForTTSRateLimit();
+  const combinedText = texts.join('. ... ');
+
+  let res;
+  let lastErrorText = '';
+  for (let attempt = 1; attempt <= TTS_MAX_ATTEMPTS; attempt++) {
+    res = await callTTSApi(combinedText);
+    if (res.ok) break;
+
+    lastErrorText = await res.text();
+    const shouldRetry = TTS_RETRY_STATUS_CODES.includes(res.status) && attempt < TTS_MAX_ATTEMPTS;
+    if (!shouldRetry) {
+      throw new Error(`TTS API error ${res.status}: ${lastErrorText.slice(0, 300)}`);
+    }
+    const delay = TTS_RETRY_DELAYS_MS[attempt - 1] || 5000;
+    await sleep(delay);
+  }
 
   if (!res.ok) {
-    const t = await res.text();
-    throw new Error(`TTS API error ${res.status}: ${t.slice(0, 300)}`);
+    throw new Error(`TTS API error ${res.status}: ${lastErrorText.slice(0, 300)}`);
   }
 
   const data = await res.json();
